@@ -41,19 +41,16 @@ local textSize
 
 local function allocateFields()
   fields = {}
-  for i=1, fields_count + 2 + #devices do
+  for i=0, fields_count + 2 + #devices do
     fields[i] = { }
   end
   fields[#fields] = {name="----EXIT----", type=14}
 end
 
-local function reloadAllField()
-  fieldChunk = 0
-  fieldData = nil
+local function reloadFields(toLoad)
   -- loadQ is actually a stack
-  loadQ = {}
-  for fieldId = fields_count, 1, -1 do
-    loadQ[#loadQ+1] = fieldId
+  for i = #toLoad, 1, -1 do
+    loadQ[#loadQ+1] = toLoad[i]
   end
 end
 
@@ -61,7 +58,7 @@ local function getField(line)
   local counter = 1
   for i = 1, #fields do
     local field = fields[i]
-    if currentFolderId == field.parent and not field.hidden then
+    if field.type ~= nil and currentFolderId == field.parent and not field.hidden then
       if counter < line then
         counter = counter + 1
       else
@@ -293,6 +290,18 @@ local function fieldStringDisplay(field, y, attr)
   lcd.drawText(COL2, y, field.value, attr)
 end
 
+-- FOLDER
+local function fieldFolderLoad(field, data, offset)
+  local children = {}
+  for i = offset, #data-1, 1 do
+    children[#children+1] = data[i]
+  end
+  field.children = children
+  if field.id == 0 then
+    reloadFields(field.children)
+  end
+end
+
 local function fieldFolderOpen(field)
   currentFolderId = field.id
   local backFld = fields[#fields]
@@ -301,7 +310,8 @@ local function fieldFolderOpen(field)
   backFld.li = lineIndex
   backFld.po = pageOffset
   backFld.parent = currentFolderId
-
+  -- reload all the sub-elements of the folder
+  reloadFields(field.children)
   lineIndex = 1
   pageOffset = 0
 end
@@ -403,8 +413,8 @@ local function parseDeviceInfoMessage(data)
     if newFieldCount ~= fields_count or newFieldCount == 0 then
       fields_count = newFieldCount
       allocateFields()
-      reloadAllField()
-      fields[fields_count+1] = {id = fields_count+1, name="Other Devices", parent = 255, type=16} -- add other devices folders
+      loadQ[#loadQ+1] = 0 -- load the root folder
+      fields[fields_count+1] = {id = fields_count+1, name="Other Devices", parent = 255, type=16, children={}} -- add other devices folders
       if newFieldCount == 0 then
         -- This device has no fields so the Loading code never starts
         createDeviceFields()
@@ -425,7 +435,7 @@ local functions = {
   { load=fieldFloatLoad, save=fieldIntSave, display=fieldFloatDisplay },  --9 FLOAT(8)
   { load=fieldTextSelLoad, save=fieldIntSave, display=nil }, --10 SELECT(9)
   { load=fieldStringLoad, save=nil, display=fieldStringDisplay }, --11 STRING(10) editing NOTIMPL
-  { load=nil, save=fieldFolderOpen, display=fieldFolderDisplay }, --12 FOLDER(11)
+  { load=fieldFolderLoad, save=fieldFolderOpen, display=fieldFolderDisplay }, --12 FOLDER(11)
   { load=fieldStringLoad, save=nil, display=fieldStringDisplay }, --13 INFO(12)
   { load=fieldCommandLoad, save=fieldCommandSave, display=fieldCommandDisplay }, --14 COMMAND(13)
   { load=nil, save=fieldBackExec, display=fieldCommandDisplay }, --15 back/exit(14)
@@ -656,27 +666,24 @@ local function lcd_warn()
 end
 
 local function reloadRelatedFields(field)
-  -- Reload the parent folder to update the description
-  if field.parent then
-    loadQ[#loadQ+1] = field.parent
-    fields[field.parent].name = nil
+  local parent = field.parent or 0
+  if parent ~= 0 then
+    -- Reload the parent folder to update the description
+    loadQ[#loadQ+1] = parent
+    fields[parent].name = nil
   end
 
-  -- Reload all editable fields at the same level as well as the parent item
-  for fieldId = fields_count, 1, -1 do
-    -- Skip this field, will be added to end
+  -- Reload all editable sibling fields
+  local reload = fields[parent].children
+  for fieldId = #reload, 1, -1 do
     local fldTest = fields[fieldId]
     local fldType = fldTest.type or 99 -- type could be nil if still loading
-    if fieldId ~= field.id
-      and fldTest.parent == field.parent
-      and (fldType < 11 or fldType == 12) then -- ignores FOLDER/COMMAND/devices/EXIT
+    if fldType < 11 or fldType == 12 then -- ignores FOLDER/COMMAND/devices/EXIT
       fldTest.nc = true -- "no cache" the options
       loadQ[#loadQ+1] = fieldId
     end
   end
 
-  -- Reload this field
-  loadQ[#loadQ+1] = field.id
   -- with a short delay to allow the module EEPROM to commit
   fieldTimeout = getTime() + 20
 end
@@ -699,7 +706,7 @@ local function handleDevicePageEvent(event)
         if deviceId ~= 0xEE then
           changeDeviceId(0xEE) --change device id clear the fields_count, therefore the next ping will do reloadAllField()
         else
-          reloadAllField()
+          loadQ[#loadQ+1] = 0 -- load the root folder
         end
         crossfireTelemetryPush(0x28, { 0x00, 0xEA })
       else
@@ -787,7 +794,7 @@ local function runPopupPage(event)
 
   if fieldPopup.status == 0 and fieldPopup.lastStatus ~= 0 then -- stopped
       popupCompat(fieldPopup.info, "Stopped!", event)
-      reloadAllField()
+      loadQ[#loadQ+1] = 0
       fieldPopup = nil
   elseif fieldPopup.status == 3 then -- confirmation required
     local result = popupCompat(fieldPopup.info, "PRESS [OK] to confirm", event)
